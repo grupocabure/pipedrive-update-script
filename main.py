@@ -31,8 +31,10 @@ class Sale(NamedTuple):
     proposal_id: str
     product_id: int
     premium: float
+    sale_date: dt.datetime
     seller_phone: str
     pipe_product_id: int
+    insured_id: int
 
 
 def normalize_phone_number(phone: str):
@@ -66,7 +68,9 @@ def get_sales_from_db(
         ssp.ID_PROPOSTA as 'proposal_id',
         ssp.ID_TABELA as 'product_id',
         ssp.TOTAL_PREMIO_FINAL as 'premium',
-        sa.CELULAR as 'seller_phone'
+        ssp.DATA_CADASTRO as 'sale_date',
+        sa.CELULAR as 'seller_phone',
+        ssp.ID_SEGURADO as 'insured_id'
     FROM SEG_SEGURO_PROPOSTA ssp
     JOIN SEG_AGENCIADOR sa on sa.ID_AGENCIADOR = ssp.ID_AGENCIADOR
     WHERE ssp.DATA_CADASTRO BETWEEN '{beg_date.strftime(fmtstr)}' AND '{end_date.strftime(fmtstr)}'
@@ -82,8 +86,10 @@ def get_sales_from_db(
             proposal_id=s[0],
             product_id=int(s[1]),
             premium=float(s[2]),
-            seller_phone=normalize_phone_number(s[3]),
+            sale_date=s[3],
+            seller_phone=normalize_phone_number(s[4]),
             pipe_product_id=normalize_product_id(int(s[1])),
+            insured_id=int(s[5]),
         )
         for s in cur
         if s
@@ -123,7 +129,7 @@ def get_deals_from_pipedrive() -> dict[str, Deal]:
     return deals
 
 
-def append_sales_to_deal(deal_id: int, sales: list[Sale]) -> bool:
+def append_sales_to_deal_as_products(deal_id: int, sales: list[Sale]) -> bool:
     endpoint_url = f"{PIPEDRIVE_URL}/deals/{deal_id}/products"
     params = {"api_token": PIPEDRIVE_KEY}
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -133,6 +139,26 @@ def append_sales_to_deal(deal_id: int, sales: list[Sale]) -> bool:
             "product_id": sale.pipe_product_id,
             "item_price": sale.premium,
             "quantity": 1,
+        }
+        res = req.post(endpoint_url, params=params, headers=headers, json=data)
+        if res.status_code != 201:
+            print(res.__dict__)
+            return False
+    return True
+
+
+def append_sales_to_deal_as_activities(deal_id: int, sales: list[Sale]) -> bool:
+    endpoint_url = f"{PIPEDRIVE_URL}/activities"
+    params = {"api_token": PIPEDRIVE_KEY}
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+    for sale in sales:
+        data = {
+            "due_date": sale.sale_date.strftime("%Y-%m-%d"),
+            "deal_id": deal_id,
+            "done": 1,
+            "type": "vf___venda_feita",
+            "subject": f"Venda - Segurado {sale.insured_id}",
         }
         res = req.post(endpoint_url, params=params, headers=headers, json=data)
         if res.status_code != 201:
@@ -158,7 +184,7 @@ def main() -> None:
     already_synced = get_already_synced()
 
     beg_date = dt.date(2024, 5, 1)  # inclusive
-    end_date = dt.date(2024, 12, 19)  # not inclusive
+    end_date = dt.date(2025, 3, 31)  # not inclusive
     sales = get_sales_from_db(conn, beg_date, end_date)
 
     sales_by_deal_id: dict[int, list[Sale]] = {}
@@ -187,7 +213,7 @@ def main() -> None:
             f"Incluindo vendas do negócio {deal_id} ({len(sales)} vendas)",
             style="green",
         )
-        if append_sales_to_deal(deal_id, sales):
+        if append_sales_to_deal_as_activities(deal_id, sales):
             fp.writelines([f"{s.proposal_id}\n" for s in sales])
         else:
             print(
